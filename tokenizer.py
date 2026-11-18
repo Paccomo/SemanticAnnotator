@@ -1,3 +1,6 @@
+from collections import Counter
+from collections.abc import Iterable
+
 import regex
 
 default_text = ("Sami Pajari nuo trečiosios iš eilės pergalės WRC skiria vos penki likę greičio ruožai, o įspūdingas Adrieno Fourmaux tempas šeštadienį žada intriguojančią kovą dėl podiumo „ueno Rally del Paraguay“."
@@ -13,14 +16,13 @@ class Tokenizer:
         self.merges = None
         self.vocab = None
         self.minimum_occurrence = minimum_occurrence
-        self.split_regex = regex.compile(r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+""")
-        #TODO simplify regex for this case
+        self.split_regex = regex.compile(r"\p{L}[\p{L}\p{M}]*|\p{N}+|\s+|[^\s\p{L}\p{N}]")
 
     @staticmethod
-    def _get_stats(ids, counts=None):
+    def _get_stats(ids, counts=None, frequency=1):
         counts = {} if counts is None else counts
         for pair in zip(ids, ids[1:]):
-            counts[pair] = counts.get(pair, 0) + 1
+            counts[pair] = counts.get(pair, 0) + frequency
         return counts
 
     @staticmethod
@@ -46,25 +48,36 @@ class Tokenizer:
         if self.merges is None or self.vocab is None:
             raise ValueError("Tokenizer has not been trained yet")
 
-    def train(self, imported_text=None, vocab_length=10000, print_progress=True):
+    def train(
+        self,
+        imported_text: str | Iterable[str] | None = None,
+        vocab_length=10000,
+        print_progress=True,
+    ):
+        """Fit one byte-level BPE vocabulary on one or more raw documents."""
         if vocab_length < 256:
             raise ValueError("vocab_length must be at least 256")
 
-        train_text = default_text if imported_text is None else imported_text
-        text_pieces = self.split_regex.findall(train_text)
-        ids_by_piece = [
-            list(piece.encode("utf-8"))
-            for piece in text_pieces
+        training_input = default_text if imported_text is None else imported_text
+        documents = (training_input,) if isinstance(training_input, str) else training_input
+        piece_counts = Counter(
+            piece
+            for document in documents
+            for piece in self.split_regex.findall(document)
+        )
+        weighted_pieces = [
+            (list(piece.encode("utf-8")), frequency)
+            for piece, frequency in piece_counts.items()
         ]
         num_merges = vocab_length - 256
 
-        self.merges = {}
-        self.vocab = {idx: bytes([idx]) for idx in range(256)}
+        merges = {}
+        vocab = {idx: bytes([idx]) for idx in range(256)}
 
         for i in range(num_merges):
             stats = {}
-            for piece_ids in ids_by_piece:
-                self._get_stats(piece_ids, stats)
+            for piece_ids, frequency in weighted_pieces:
+                self._get_stats(piece_ids, stats, frequency)
 
             if not stats:
                 break
@@ -78,12 +91,15 @@ class Tokenizer:
             if print_progress:
                 print(f"merging {pair} into a new token {idx}")
 
-            ids_by_piece = [
-                self._merge(piece_ids, pair, idx)
-                for piece_ids in ids_by_piece
+            weighted_pieces = [
+                (self._merge(piece_ids, pair, idx), frequency)
+                for piece_ids, frequency in weighted_pieces
             ]
-            self.merges[pair] = idx
-            self.vocab[idx] = self.vocab[pair[0]] + self.vocab[pair[1]]
+            merges[pair] = idx
+            vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
+
+        self.merges = merges
+        self.vocab = vocab
 
     def encode(self, text):
         self._validate_applied_training()
@@ -122,6 +138,13 @@ class Tokenizer:
         tokens = b"".join(self.vocab[idx] for idx in ids)
         return tokens.decode("utf-8", errors="replace")
 
+    @staticmethod
+    def format_token(raw: bytes) -> str:
+        try:
+            return repr(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return repr(raw)
+
     def print_training_data(self):
         self._validate_applied_training()
 
@@ -135,9 +158,9 @@ class Tokenizer:
                 token = self.vocab[token_id]
                 print(
                     f"  {pair} -> {token_id}: "
-                    f"{left!r} + {right!r} = {token!r}"
+                    f"{self.format_token(left)} + {self.format_token(right)} = {self.format_token(token)}"
                 )
 
         print("\nVocabulary:")
         for token_id, token in sorted(self.vocab.items()):
-            print(f"  {token_id}: {token!r}")
+            print(f"  {token_id}: {self.format_token(token)}")
