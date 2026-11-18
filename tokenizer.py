@@ -139,7 +139,7 @@ class Tokenizer:
         return tokens.decode("utf-8", errors="replace")
 
     @staticmethod
-    def format_token(raw: bytes) -> str:
+    def format_token(raw: bytes):
         try:
             return repr(raw.decode("utf-8"))
         except UnicodeDecodeError:
