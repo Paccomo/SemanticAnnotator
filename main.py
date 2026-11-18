@@ -18,6 +18,45 @@ def load_dataset(data_dir: Path) -> list[dict]:
 
     return documents
 
+
+def encode_text_and_annotations(tokenizer: Tokenizer, record: dict) -> dict:
+    text = record["Text"]
+    input_ids = tokenizer.encode(text)
+    token_bytes = [tokenizer.vocab[token_id] for token_id in input_ids]
+    if b"".join(token_bytes) != text.encode("utf-8"):
+        raise ValueError("BPE token bytes must reconstruct the original text exactly")
+
+    # Compare character and token boundaries using their UTF-8 byte offsets.
+    char_byte_offsets: list[int] = [0]
+    for character in text:
+        char_byte_offsets.append(char_byte_offsets[-1] + len(character.encode("utf-8")))
+
+    token_by_byte_offset: dict[int, int] = {0: 0}
+    byte_offset = 0
+    for token_offset, raw_token in enumerate(token_bytes, start=1):
+        byte_offset += len(raw_token)
+        token_by_byte_offset[byte_offset] = token_offset
+
+    targets = []
+    for annotation in record["Annotations"]:
+        start: int = annotation["Start"]
+        end: int = annotation["End"]
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or not 0 <= start < end <= len(text)
+        ):
+            raise ValueError(f"Invalid annotation offsets [{start!r}, {end!r})")
+        start_token = token_by_byte_offset.get(char_byte_offsets[start])
+        end_token = token_by_byte_offset.get(char_byte_offsets[end])
+        if start_token is None or end_token is None:
+            raise ValueError(f"Annotation [{start}, {end}) must align with BPE token boundaries")
+
+        targets.append((start_token, end_token, annotation["Element"]))
+
+    return {"input_ids": input_ids, "targets": targets}
+
+
 if __name__ == "__main__":
     data_dir = Path(__file__).resolve().parent / "Data"
     documents = load_dataset(data_dir)
@@ -49,9 +88,15 @@ if __name__ == "__main__":
     tokenizer = Tokenizer()
     tokenizer.train(train["Text"], 300)
 
-    train_ids = tokenizer.encode(train["Text"])
-    validation_ids = tokenizer.encode(validation["Text"])
+    train_example = encode_text_and_annotations(tokenizer, train)
+    validation_example = encode_text_and_annotations(tokenizer, validation)
     tokenizer.print_training_data()
+
+    for name, example in (("Train", train_example), ("Validation", validation_example)):
+        print(
+            f"{name}: {len(example['input_ids'])} BPE tokens, "
+            f"{len(example['targets'])} span targets"
+        )
 
 # text_path = Path(__file__).parent / "tests" / "test.txt"
 # training_text = text_path.read_text(encoding="utf-8")
